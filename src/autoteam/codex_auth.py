@@ -71,10 +71,17 @@ def _page_excerpt(page, limit=240):
         return ""
 
 
+def _is_account_deactivated_text(text):
+    text = (text or "").lower()
+    return "account_deactivated" in text or ("account" in text and "deactivated" in text)
+
+
 def _classify_oauth_failure(url, body_excerpt=""):
     url = (url or "").lower()
     body = (body_excerpt or "").lower()
 
+    if _is_account_deactivated_text(url) or _is_account_deactivated_text(body):
+        return "account_deactivated", "账号已被封禁或停用", False
     if "add-phone" in url:
         return "add_phone", "需要手机号验证", False
     if "verify you are human" in body or "captcha" in body:
@@ -88,6 +95,22 @@ def _classify_oauth_failure(url, body_excerpt=""):
     if "/auth/login" in url or "log-in-or-create-account" in url:
         return "login_state_lost", "登录态丢失或回到了登录页", True
     return "auth_code_missing", f"未获取到 auth code（停留在 {url or 'unknown'}）", True
+
+
+def _account_deactivated_failure_result(page):
+    body_excerpt = _page_excerpt(page)
+    error_type, error_detail, retryable = _classify_oauth_failure(page.url, body_excerpt)
+    if error_type != "account_deactivated":
+        return None
+    return {
+        "ok": False,
+        "bundle": None,
+        "error_type": error_type,
+        "error_detail": error_detail,
+        "retryable": retryable,
+        "current_url": page.url,
+        "body_excerpt": body_excerpt,
+    }
 
 
 def _build_auth_url(code_challenge, state):
@@ -286,6 +309,8 @@ def _detect_otp_error(page):
     except Exception:
         return None
 
+    if _is_account_deactivated_text(body):
+        return "account_deactivated"
     for hint in _OTP_INVALID_HINTS:
         if hint in body:
             return hint
@@ -297,6 +322,7 @@ def _wait_for_otp_submit_result(page, timeout=12):
     等待验证码提交结果：
     - accepted: 验证码输入框已消失 / 页面已前进
     - invalid: 页面明确提示验证码错误
+    - account_deactivated: 页面明确提示账号被封禁/停用
     - pending: 既没报错也没明显前进（常见于页面较慢或状态未稳定）
     """
     deadline = time.time() + timeout
@@ -304,6 +330,8 @@ def _wait_for_otp_submit_result(page, timeout=12):
     while time.time() < deadline:
         err = _detect_otp_error(page)
         if err:
+            if err == "account_deactivated":
+                return "account_deactivated", err
             return "invalid", err
         if not _is_otp_input_visible(page, timeout=250):
             return "accepted", None
@@ -311,6 +339,8 @@ def _wait_for_otp_submit_result(page, timeout=12):
 
     err = _detect_otp_error(page)
     if err:
+        if err == "account_deactivated":
+            return "account_deactivated", err
         return "invalid", err
     return "pending", None
 
@@ -376,15 +406,19 @@ def _workspace_label_candidates(page):
 
 
 def _click_workspace_locator(loc) -> bool:
-    try:
-        loc.click(timeout=3000)
-        return True
-    except Exception:
+    clicked = False
+    for attempt in range(3):
         try:
-            loc.click(force=True, timeout=3000)
-            return True
+            loc.click(timeout=3000 if attempt == 0 else 1000)
+            clicked = True
         except Exception:
-            return False
+            try:
+                loc.click(force=True, timeout=1000)
+                clicked = True
+            except Exception:
+                continue
+        time.sleep(0.4)
+    return clicked
 
 
 def _select_team_workspace(page, workspace_name: str) -> bool:
@@ -763,6 +797,11 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
 
             # 在任何页面中，如果有 workspace/组织选择，先选 Team
             try:
+                failure_result = _account_deactivated_failure_result(page)
+                if failure_result:
+                    logger.error("[Codex] 登录页提示账号被封禁/停用，停止重试: %s", email)
+                    break
+
                 workspace_name = get_chatgpt_workspace_name()
                 # 检测"选择一个工作空间"页面，点击 Team workspace
                 if _is_workspace_selection_page(page):
@@ -886,6 +925,11 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
                             if submit_status == "accepted":
                                 submit_ok = True
                                 break
+                            if submit_status == "account_deactivated":
+                                failure_result = _account_deactivated_failure_result(page)
+                                _used_email_ids.add(otp_email_id)
+                                logger.error("[Codex] 验证码提交后账号被封禁/停用，停止重试: %s", email)
+                                break
                             if submit_status == "invalid":
                                 _used_email_ids.add(otp_email_id)
                                 detail_suffix = f"，命中提示: {submit_detail}" if submit_detail else ""
@@ -915,11 +959,16 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
 
                         if submit_ok:
                             _used_email_ids.add(otp_email_id)
+                        if failure_result and failure_result.get("error_type") == "account_deactivated":
+                            break
                         continue
                     if page_left_code:
                         continue
             except Exception:
                 pass
+
+            if failure_result and failure_result.get("error_type") == "account_deactivated":
+                break
 
             try:
                 consent_btn = page.locator(
@@ -938,6 +987,8 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
         # 等待 redirect callback 获取 auth code
         for _ in range(30):
             if auth_code:
+                break
+            if failure_result and failure_result.get("error_type") == "account_deactivated":
                 break
             # 也从当前 URL 尝试提取（CPA 可能接收了回调）
             try:

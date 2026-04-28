@@ -92,7 +92,8 @@ def _chatgpt_session_ready(chatgpt_api) -> bool:
     return bool(getattr(chatgpt_api, "browser", None))
 
 
-AUTH_REPAIR_HARD_FAILURE_TYPES = {"add_phone", "human_verification"}
+ACCOUNT_DEACTIVATED_ERROR_TYPE = "account_deactivated"
+AUTH_REPAIR_HARD_FAILURE_TYPES = {"add_phone", "human_verification", ACCOUNT_DEACTIVATED_ERROR_TYPE}
 
 
 def _normalized_email(value: str | None) -> str:
@@ -220,6 +221,7 @@ def _auth_repair_retry_delays() -> tuple[int, int, int]:
 
 def _auth_repair_error_label(error_type: str | None) -> str:
     mapping = {
+        "account_deactivated": "账号封禁/停用",
         "add_phone": "手机号验证",
         "human_verification": "人机验证",
         "email_verification": "邮箱验证码页卡住",
@@ -248,6 +250,27 @@ def _auth_repair_state_suffix(state: dict | None) -> str:
 
 def _auth_repair_reset(email: str):
     update_account(email, **_auth_repair_reset_fields())
+
+
+def _is_account_deactivated_login_result(result: dict | None) -> bool:
+    return isinstance(result, dict) and result.get("error_type") == ACCOUNT_DEACTIVATED_ERROR_TYPE
+
+
+def _delete_account_deactivated_account(email: str, *, mail_client=None, chatgpt_api=None):
+    logger.error("[%s] 账号已被封禁/停用，删除账号并停止自动重试", email)
+    try:
+        return delete_managed_account(
+            email,
+            remove_remote=True,
+            remove_cloudmail=True,
+            sync_cpa_after=True,
+            chatgpt_api=chatgpt_api,
+            mail_client=mail_client,
+        )
+    except Exception as exc:
+        logger.error("[%s] 账号封禁/停用后的删除流程失败，暂停自动重试: %s", email, exc)
+        _record_auth_repair_failure(email, ACCOUNT_DEACTIVATED_ERROR_TYPE, f"账号已封禁/停用，删除失败: {exc}")
+        return None
 
 
 def _auth_repair_skip_reason(acc: dict | None, *, force: bool = False, now: float | None = None) -> str | None:
@@ -940,6 +963,10 @@ def cmd_check(force_auth_repair=False):
                 mail_client.login()
                 mail_clients[provider] = mail_client
             login_result = _login_codex_with_result(email, password, mail_client=mail_client)
+            if _is_account_deactivated_login_result(login_result):
+                _delete_account_deactivated_account(email, mail_client=mail_client)
+                continue
+
             bundle = login_result.get("bundle")
             if login_result.get("ok") and bundle:
                 auth_file = save_auth_file(bundle)
@@ -1100,6 +1127,10 @@ def _complete_registration(email, password, invite_link, mail_client):
 
     # Codex 登录
     login_result = _login_codex_with_result(email, password, mail_client=mail_client)
+    if _is_account_deactivated_login_result(login_result):
+        _delete_account_deactivated_account(email, mail_client=mail_client)
+        return None
+
     bundle = login_result.get("bundle")
     if login_result.get("ok") and bundle:
         auth_file = save_auth_file(bundle)
@@ -1906,6 +1937,10 @@ def create_account_direct(mail_client):
 
     # Step 4: Codex 登录
     login_result = _login_codex_with_result(email, password, mail_client=mail_client)
+    if _is_account_deactivated_login_result(login_result):
+        _delete_account_deactivated_account(email, mail_client=mail_client)
+        return None
+
     bundle = login_result.get("bundle")
     if login_result.get("ok") and bundle:
         auth_file = save_auth_file(bundle)
@@ -1961,6 +1996,10 @@ def reinvite_account(chatgpt_api, mail_client, acc):
         chatgpt_api.stop()
 
     login_result = _login_codex_with_result(email, password, mail_client=mail_client)
+    if _is_account_deactivated_login_result(login_result):
+        _delete_account_deactivated_account(email, mail_client=mail_client, chatgpt_api=chatgpt_api)
+        return False
+
     bundle = login_result.get("bundle")
     if not login_result.get("ok") or not bundle:
         final_status = _set_auth_pending_or_standby(email)
@@ -2004,7 +2043,7 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
     TARGET = target_seats
     ACTIVE_TARGET = _pool_active_target(TARGET)
 
-    from autoteam.config import AUTO_CHECK_THRESHOLD
+    from autoteam.config import ACCOUNT_REUSE_MODE, AUTO_CHECK_THRESHOLD
 
     try:
         from autoteam.api import _auto_check_config
@@ -2052,6 +2091,25 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
     def current_pool_active_count():
         return _count_pool_active_accounts(load_accounts(), require_auth=True)
 
+    one_use_accounts = ACCOUNT_REUSE_MODE == "one_use"
+
+    def delete_one_use_account(acc, *, stage_label):
+        email = acc["email"]
+        try:
+            cleanup = delete_managed_account(
+                email,
+                remove_remote=True,
+                remove_cloudmail=True,
+                sync_cpa_after=False,
+                chatgpt_api=ensure_chatgpt(),
+                mail_client=ensure_account_mail(acc),
+            )
+            logger.info("%s 一次性模式清理账号: %s", stage_label, email)
+            return cleanup or {}
+        except Exception as exc:
+            logger.warning("%s 一次性模式清理账号失败，跳过本次删除: %s (%s)", stage_label, email, exc)
+            return {}
+
     logger.info("[1/5] 同步 Team 状态...")
     sync_account_states()
 
@@ -2071,7 +2129,17 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
         removed_now = 0
         already_absent_count = 0
 
-        if all_exhausted:
+        if all_exhausted and one_use_accounts:
+            logger.info("[3/5] 一次性模式：删除 %d 个额度用完的账号...", len(all_exhausted))
+            ensure_chatgpt()
+            initial_api_count = get_team_member_count(chatgpt)
+            for acc in all_exhausted:
+                cleanup = delete_one_use_account(acc, stage_label="[3/5]")
+                if cleanup.get("team_member_removed"):
+                    removed_now += 1
+                else:
+                    already_absent_count += 1
+        elif all_exhausted:
             logger.info("[3/5] 移出 %d 个额度用完的账号...", len(all_exhausted))
             ensure_chatgpt()
             initial_api_count = get_team_member_count(chatgpt)
@@ -2090,6 +2158,18 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
                         logger.info("[3/5] %s → standby（远端已不存在）", email)
         else:
             logger.info("[3/5] 无需移出账号")
+
+        if one_use_accounts:
+            standby_cleanup = [
+                a
+                for a in load_accounts()
+                if a["status"] == STATUS_STANDBY and not _is_main_account_email(a.get("email"))
+            ]
+            if standby_cleanup:
+                logger.info("[3/5] 一次性模式：清理 %d 个 standby 账号...", len(standby_cleanup))
+                for acc in standby_cleanup:
+                    delete_one_use_account(acc, stage_label="[3/5]")
+
         if not _chatgpt_session_ready(chatgpt):
             ensure_chatgpt()
         api_count = get_team_member_count(chatgpt)
@@ -2169,12 +2249,17 @@ def cmd_rotate(target_seats=5, force_auth_repair=False):
 
         logger.info("[4/5] 填补 %d 个空缺 (当前 %d/%d)...", vacancies, current_count, TARGET)
 
-        # 优先复用旧账号（先验证额度是否真的恢复了）
         filled = 0
-        standby_list = [a for a in get_standby_accounts() if not _is_main_account_email(a.get("email"))]
         quota_skipped = []
         auto_reuse_skipped = []
         retry_throttled = []
+
+        if one_use_accounts:
+            logger.info("[4/5] 一次性模式：跳过 standby 复用流程")
+            standby_list = []
+        else:
+            # 优先复用旧账号（先验证额度是否真的恢复了）
+            standby_list = [a for a in get_standby_accounts() if not _is_main_account_email(a.get("email"))]
 
         for acc in standby_list:
             if filled >= vacancies:

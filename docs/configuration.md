@@ -41,6 +41,8 @@ cp .env.example .env
 | `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`） |
 | `AUTO_CHECK_INTERVAL` | 巡检间隔（秒） | 否（默认 `300`） |
 | `AUTO_CHECK_MIN_LOW` | 至少几个账号低于阈值才触发 | 否（默认 `2`） |
+| `AUTO_CHECK_TARGET_SEATS` | 后台自动巡检维护的 Team 总人数目标；不影响手动 `fill` / `rotate` 的显式 target | 否（默认 `5`） |
+| `ACCOUNT_REUSE_MODE` | 账号复用策略：`reuse` 保持 standby 复用；`one_use` 用完即调用 `delete_managed_account()` 并直接注册补位 | 否（默认 `reuse`） |
 
 ## 配置面板分区
 

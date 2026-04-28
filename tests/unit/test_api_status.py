@@ -288,6 +288,7 @@ def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(mo
             CLOUDMAIL_DOMAIN="",
             CPA_URL="",
             CPA_KEY="",
+            ACCOUNT_REUSE_MODE="one_use",
             PLAYWRIGHT_PROXY_URL="",
             PLAYWRIGHT_PROXY_BYPASS="",
             API_KEY="old-key",
@@ -296,6 +297,7 @@ def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(mo
 
     assert result["message"] == "配置保存成功"
     assert written["API_KEY"] == "old-key"
+    assert written["ACCOUNT_REUSE_MODE"] == "one_use"
     assert "CPA_URL" not in written
 
 
@@ -389,23 +391,36 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
     sync_calls = []
 
     monkeypatch.setattr("autoteam.setup_wizard._write_env", lambda key, value: written.setdefault(key, value))
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 300, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 300, "threshold": 10, "min_low": 2, "target_seats": 5})
     monkeypatch.setattr(api, "_auto_check_restart", restart_event)
     monkeypatch.setattr(api, "_sync_runtime_env_reload_state", lambda: sync_calls.append("synced"))
 
-    result = api.set_auto_check_config(api.AutoCheckConfig(interval=420, threshold=15, min_low=3))
+    result = api.set_auto_check_config(api.AutoCheckConfig(interval=420, threshold=15, min_low=3, target_seats=4))
 
-    assert result == {"interval": 420, "threshold": 15, "min_low": 3}
+    assert result == {"interval": 420, "threshold": 15, "min_low": 3, "target_seats": 4}
     assert written == {
         "AUTO_CHECK_INTERVAL": "420",
         "AUTO_CHECK_THRESHOLD": "15",
         "AUTO_CHECK_MIN_LOW": "3",
+        "AUTO_CHECK_TARGET_SEATS": "4",
     }
     assert restart_event.is_set() is True
     assert sync_calls == ["synced"]
     assert os.environ["AUTO_CHECK_INTERVAL"] == "420"
     assert os.environ["AUTO_CHECK_THRESHOLD"] == "15"
     assert os.environ["AUTO_CHECK_MIN_LOW"] == "3"
+    assert os.environ["AUTO_CHECK_TARGET_SEATS"] == "4"
+
+
+def test_set_auto_check_config_preserves_target_seats_when_omitted(monkeypatch):
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 300, "threshold": 10, "min_low": 2, "target_seats": 7})
+    monkeypatch.setattr(api, "_auto_check_restart", threading.Event())
+    monkeypatch.setattr("autoteam.setup_wizard._write_env", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api, "_sync_runtime_env_reload_state", lambda: None)
+
+    result = api.set_auto_check_config(api.AutoCheckConfig(interval=420, threshold=15, min_low=3))
+
+    assert result["target_seats"] == 7
 
 
 @pytest.mark.parametrize(
@@ -417,6 +432,7 @@ def test_set_auto_check_config_persists_values_to_env(monkeypatch):
         ({"SUB2API_RATE_MULTIPLIER": "0"}, "SUB2API_RATE_MULTIPLIER 必须是大于 0 的数字"),
         ({"SUB2API_AUTO_PAUSE_ON_EXPIRED": "maybe"}, "SUB2API_AUTO_PAUSE_ON_EXPIRED 必须是 true 或 false"),
         ({"SUB2API_OPENAI_WS_MODE": "socket"}, "SUB2API_OPENAI_WS_MODE 必须是 off、ctx_pool 或 passthrough"),
+        ({"ACCOUNT_REUSE_MODE": "forever"}, "ACCOUNT_REUSE_MODE 必须是 reuse 或 one_use"),
     ],
 )
 def test_put_runtime_config_rejects_invalid_sub2api_default_settings(monkeypatch, payload, message):
@@ -970,7 +986,7 @@ def test_auto_check_triggers_rotate_when_active_count_is_below_target(tmp_path, 
         )
 
     _set_pool_runtime_config(monkeypatch)
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2, "target_seats": 4})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
     monkeypatch.setattr(api, "_maybe_reload_runtime_config_from_env_file", lambda *args, **kwargs: False)
@@ -1003,11 +1019,11 @@ def test_auto_check_triggers_rotate_when_active_count_is_below_target(tmp_path, 
 
     assert len(started) == 1
     assert started[0]["command"] == "auto-rotate"
-    assert started[0]["params"]["target"] == 5
+    assert started[0]["params"]["target"] == 4
     assert started[0]["params"]["trigger"] == "auto-check"
-    assert started[0]["params"]["shortage"] == 2
+    assert started[0]["params"]["shortage"] == 1
     assert started[0]["params"]["low_accounts"] == 0
-    assert started[0]["args"] == (5,)
+    assert started[0]["args"] == (4,)
 
 
 def test_auto_check_does_not_rotate_when_team_is_full_but_no_local_repair_candidate_exists(
@@ -1410,7 +1426,8 @@ def test_run_playwright_probe_kills_process_group_on_timeout(monkeypatch):
             killed.append("kill")
 
     monkeypatch.setattr(api.subprocess, "Popen", lambda *args, **kwargs: _FakeProc())
-    monkeypatch.setattr(api.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(api.os, "killpg", lambda pid, sig: killed.append((pid, sig)), raising=False)
+    monkeypatch.setattr(api.signal, "SIGKILL", 9, raising=False)
 
     with pytest.raises(TimeoutError):
         api._run_playwright_probe("team-member-count", timeout_seconds=0.01)

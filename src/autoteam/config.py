@@ -53,6 +53,13 @@ def _normalize_chatgpt_api_transport(value: str) -> str:
     return "auto"
 
 
+def _normalize_account_reuse_mode(value: str) -> str:
+    mode = str(value or "").strip().lower().replace("-", "_")
+    if mode in {"one_use", "delete", "discard", "delete_and_register"}:
+        return "one_use"
+    return "reuse"
+
+
 # CloudMail 配置
 CLOUDMAIL_BASE_URL = os.environ.get("CLOUDMAIL_BASE_URL", "")
 CLOUDMAIL_EMAIL = os.environ.get("CLOUDMAIL_EMAIL", "")
@@ -100,6 +107,8 @@ API_KEY = os.environ.get("API_KEY", "")
 AUTO_CHECK_INTERVAL = _get_int_env("AUTO_CHECK_INTERVAL", 300)  # 巡检间隔（秒），默认 5 分钟
 AUTO_CHECK_THRESHOLD = _get_int_env("AUTO_CHECK_THRESHOLD", 10)  # 额度低于此百分比触发轮转，默认 10%
 AUTO_CHECK_MIN_LOW = _get_int_env("AUTO_CHECK_MIN_LOW", 2)  # 至少几个账号低于阈值才触发，默认 2
+AUTO_CHECK_TARGET_SEATS = max(1, _get_int_env("AUTO_CHECK_TARGET_SEATS", 5))  # 自动巡检维护的 Team 总人数目标
+ACCOUNT_REUSE_MODE = _normalize_account_reuse_mode(_get_str_env("ACCOUNT_REUSE_MODE", "reuse"))
 
 # Playwright 代理配置
 PLAYWRIGHT_PROXY_URL = os.environ.get("PLAYWRIGHT_PROXY_URL", "").strip()

@@ -224,3 +224,67 @@ def test_cmd_check_force_auth_repair_ignores_cooldown(monkeypatch):
     manager.cmd_check(force_auth_repair=True)
 
     assert calls == [("pending@example.com", "", "cloudmail")]
+
+
+def test_cmd_check_deletes_account_deactivated_without_retry(monkeypatch):
+    class FakeMailClient:
+        provider_name = "cloudmail"
+
+        def login(self):
+            return None
+
+    fake_mail = FakeMailClient()
+    deleted = []
+
+    monkeypatch.setattr(
+        manager,
+        "load_accounts",
+        lambda: [
+            {
+                "email": "banned@example.com",
+                "status": "auth_pending",
+                "password": "",
+                "auth_file": None,
+                "mail_provider": "cloudmail",
+                "mail_account_id": 77,
+            }
+        ],
+    )
+    monkeypatch.setattr(manager, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(manager, "get_mail_domain", lambda: "@example.com")
+    monkeypatch.setattr(manager, "_get_account_mail_client", lambda _acc: fake_mail)
+    monkeypatch.setattr(
+        manager,
+        "_login_codex_with_result",
+        lambda *args, **kwargs: {
+            "ok": False,
+            "bundle": None,
+            "error_type": "account_deactivated",
+            "error_detail": "账号已被封禁或停用",
+            "retryable": False,
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "delete_managed_account",
+        lambda email, **kwargs: deleted.append((email, kwargs)) or {"local_record": True},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_record_auth_repair_failure",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not record retry state")),
+    )
+    monkeypatch.setattr(
+        manager,
+        "update_account",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not mark auth_pending/standby")),
+    )
+
+    exhausted = manager.cmd_check(force_auth_repair=False)
+
+    assert exhausted == []
+    assert len(deleted) == 1
+    assert deleted[0][0] == "banned@example.com"
+    assert deleted[0][1]["remove_remote"] is True
+    assert deleted[0][1]["remove_cloudmail"] is True
+    assert deleted[0][1]["mail_client"] is fake_mail

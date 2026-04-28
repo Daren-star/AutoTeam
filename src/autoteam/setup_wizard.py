@@ -50,6 +50,7 @@ REQUIRED_CONFIGS = [
     ("SUB2API_OPENAI_WS_MODE", "Sub2API OpenAI WS 模式（off/ctx_pool/passthrough）", "off", True),
     ("SUB2API_OPENAI_PASSTHROUGH", "Sub2API OpenAI passthrough（true/false）", "false", True),
     ("SUB2API_OVERWRITE_ACCOUNT_SETTINGS", "Sub2API 同步时覆盖账号默认设置（true/false）", "false", True),
+    ("ACCOUNT_REUSE_MODE", "账号复用模式（reuse/one_use）", "reuse", True),
     ("PLAYWRIGHT_PROXY_URL", "Playwright 浏览器代理 URL（可选，如 socks5://host:port）", "", True),
     ("PLAYWRIGHT_PROXY_BYPASS", "Playwright 代理绕过列表（可选，如 localhost,127.0.0.1）", "", True),
     ("API_KEY", "API 鉴权密钥（回车自动生成）", "", False),

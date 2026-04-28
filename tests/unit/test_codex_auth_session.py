@@ -87,6 +87,7 @@ class _FakeElement:
     def __init__(self, text):
         self._text = text
         self.clicked = False
+        self.click_calls = []
 
     def is_visible(self, timeout=0):
         return True
@@ -96,6 +97,13 @@ class _FakeElement:
 
     def click(self, timeout=0, force=False):
         self.clicked = True
+        self.click_calls.append({"timeout": timeout, "force": force})
+
+
+class _AlwaysFailClickElement(_FakeElement):
+    def click(self, timeout=0, force=False):
+        self.click_calls.append({"timeout": timeout, "force": force})
+        raise RuntimeError("click failed")
 
 
 class _FakeCollection:
@@ -132,6 +140,31 @@ def test_workspace_selection_detection_ignores_otp_pages():
 
     assert codex_auth._is_workspace_selection_page(page) is False
     assert codex_auth._select_team_workspace(page, "Idapro") is False
+
+
+def test_account_deactivated_email_verification_error_is_non_retryable():
+    error_type, error_detail, retryable = codex_auth._classify_oauth_failure(
+        "https://auth.openai.com/email-verification",
+        "验证过程中出错 (account_deactivated)。请重试。",
+    )
+
+    assert error_type == "account_deactivated"
+    assert "封禁" in error_detail or "停用" in error_detail
+    assert retryable is False
+
+
+def test_account_deactivated_password_page_returns_terminal_failure():
+    page = _FakePage(
+        url="https://auth.openai.com/log-in/password",
+        body="验证过程中出错 (account_deactivated)。请重试。",
+    )
+
+    result = codex_auth._account_deactivated_failure_result(page)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "account_deactivated"
+    assert result["retryable"] is False
+    assert result["current_url"] == "https://auth.openai.com/log-in/password"
 
 
 def test_workspace_label_candidates_ignore_action_buttons():
@@ -176,3 +209,38 @@ def test_team_workspace_selection_requires_exact_workspace_name():
 
     assert codex_auth._workspace_label_candidates(page) == [("Personal account", items[1])]
     assert codex_auth._select_team_workspace(page, "Idapro") is False
+
+
+def test_workspace_selection_retries_matched_target_click_three_rounds():
+    target = _FakeElement("Idapro")
+    page = _FakePage(
+        url="https://auth.openai.com/workspace",
+        body="Choose a workspace Workspace Idapro Personal account",
+        elements=[target, _FakeElement("Personal account")],
+    )
+
+    assert codex_auth._select_team_workspace(page, "Idapro") is True
+    assert target.click_calls == [
+        {"timeout": 3000, "force": False},
+        {"timeout": 1000, "force": False},
+        {"timeout": 1000, "force": False},
+    ]
+
+
+def test_workspace_selection_uses_force_fallback_each_failed_round():
+    target = _AlwaysFailClickElement("Idapro")
+    page = _FakePage(
+        url="https://auth.openai.com/workspace",
+        body="Choose a workspace Workspace Idapro Personal account",
+        elements=[target, _FakeElement("Personal account")],
+    )
+
+    assert codex_auth._select_team_workspace(page, "Idapro") is False
+    assert target.click_calls == [
+        {"timeout": 3000, "force": False},
+        {"timeout": 1000, "force": True},
+        {"timeout": 1000, "force": False},
+        {"timeout": 1000, "force": True},
+        {"timeout": 1000, "force": False},
+        {"timeout": 1000, "force": True},
+    ]

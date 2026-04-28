@@ -101,6 +101,7 @@ class SetupConfig(BaseModel):
     SUB2API_OPENAI_WS_MODE: str = "off"
     SUB2API_OPENAI_PASSTHROUGH: str | bool = "false"
     SUB2API_OVERWRITE_ACCOUNT_SETTINGS: str | bool = "false"
+    ACCOUNT_REUSE_MODE: str = "reuse"
     PLAYWRIGHT_PROXY_URL: str = ""
     PLAYWRIGHT_PROXY_BYPASS: str = ""
     API_KEY: str = ""
@@ -155,12 +156,14 @@ _ALL_RUNTIME_ENV_KEYS = [
     "SUB2API_OPENAI_WS_MODE",
     "SUB2API_OPENAI_PASSTHROUGH",
     "SUB2API_OVERWRITE_ACCOUNT_SETTINGS",
+    "ACCOUNT_REUSE_MODE",
     "EMAIL_POLL_INTERVAL",
     "EMAIL_POLL_TIMEOUT",
     "API_KEY",
     "AUTO_CHECK_INTERVAL",
     "AUTO_CHECK_THRESHOLD",
     "AUTO_CHECK_MIN_LOW",
+    "AUTO_CHECK_TARGET_SEATS",
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_SERVER",
     "PLAYWRIGHT_PROXY_USERNAME",
@@ -557,6 +560,12 @@ def _validate_runtime_optional_values(values: dict[str, str]):
             raise ValueError("SUB2API_OPENAI_WS_MODE 必须是 off、ctx_pool 或 passthrough")
         normalized["SUB2API_OPENAI_WS_MODE"] = ws_mode
 
+    reuse_mode = str(normalized.get("ACCOUNT_REUSE_MODE", "") or "").strip().lower().replace("-", "_")
+    if reuse_mode:
+        if reuse_mode not in {"reuse", "one_use"}:
+            raise ValueError("ACCOUNT_REUSE_MODE 必须是 reuse 或 one_use")
+        normalized["ACCOUNT_REUSE_MODE"] = reuse_mode
+
     whitelist = str(normalized.get("SUB2API_MODEL_WHITELIST", "") or "").strip()
     if whitelist:
         normalized["SUB2API_MODEL_WHITELIST"] = ",".join(part.strip() for part in whitelist.split(",") if part.strip())
@@ -577,11 +586,17 @@ def _sync_runtime_globals():
         return
 
     try:
-        from autoteam.config import AUTO_CHECK_INTERVAL, AUTO_CHECK_MIN_LOW, AUTO_CHECK_THRESHOLD
+        from autoteam.config import (
+            AUTO_CHECK_INTERVAL,
+            AUTO_CHECK_MIN_LOW,
+            AUTO_CHECK_TARGET_SEATS,
+            AUTO_CHECK_THRESHOLD,
+        )
 
         auto_check_config["interval"] = AUTO_CHECK_INTERVAL
         auto_check_config["threshold"] = AUTO_CHECK_THRESHOLD
         auto_check_config["min_low"] = AUTO_CHECK_MIN_LOW
+        auto_check_config["target_seats"] = AUTO_CHECK_TARGET_SEATS
         if auto_check_restart is not None:
             auto_check_restart.set()
     except Exception:
@@ -2302,6 +2317,9 @@ from autoteam.config import (
     AUTO_CHECK_MIN_LOW as _DEFAULT_MIN_LOW,
 )
 from autoteam.config import (
+    AUTO_CHECK_TARGET_SEATS as _DEFAULT_TARGET_SEATS,
+)
+from autoteam.config import (
     AUTO_CHECK_THRESHOLD as _DEFAULT_THRESHOLD,
 )
 
@@ -2310,6 +2328,7 @@ _auto_check_config = {
     "interval": _DEFAULT_INTERVAL,
     "threshold": _DEFAULT_THRESHOLD,
     "min_low": _DEFAULT_MIN_LOW,
+    "target_seats": _DEFAULT_TARGET_SEATS,
 }
 _auto_check_stop = threading.Event()
 _auto_check_restart = threading.Event()  # 配置变更时通知线程重启
@@ -2449,9 +2468,6 @@ def _auto_check_loop():
         sync_account_states,
     )
 
-    target_seats = 5
-    pool_active_target = _pool_active_target(target_seats)
-
     def _collect_auto_check_state(accounts, cfg):
         account_by_email = {
             (a.get("email") or "").strip().lower(): a for a in accounts if (a.get("email") or "").strip()
@@ -2534,9 +2550,11 @@ def _auto_check_loop():
             logger.warning("[配置] 自动热加载失败: %s", exc)
 
         cfg = _auto_check_config
+        target_seats = max(1, int(cfg.get("target_seats", _DEFAULT_TARGET_SEATS)))
         logger.info(
-            "[巡检] 等待 %d 分钟后执行下一轮检查（阈值: %d%%, 触发: >=%d 个）",
+            "[巡检] 等待 %d 分钟后执行下一轮检查（目标: %d, 阈值: %d%%, 触发: >=%d 个）",
             cfg["interval"] // 60,
+            target_seats,
             cfg["threshold"],
             cfg["min_low"],
         )
@@ -2550,6 +2568,8 @@ def _auto_check_loop():
 
         try:
             cfg = _auto_check_config  # 重新读取
+            target_seats = max(1, int(cfg.get("target_seats", _DEFAULT_TARGET_SEATS)))
+            pool_active_target = _pool_active_target(target_seats)
             accounts = load_accounts()
             state = _collect_auto_check_state(accounts, cfg)
             local_active_count = state["local_active_count"]
@@ -2791,6 +2811,7 @@ class AutoCheckConfig(BaseModel):
     interval: int = 300  # 巡检间隔（秒）
     threshold: int = 10  # 额度阈值（%）
     min_low: int = 2  # 触发轮转的最少账号数
+    target_seats: int | None = None  # 自动巡检维护的 Team 总人数目标
 
 
 def _normalized_auto_check_config(cfg: AutoCheckConfig | dict[str, int]) -> dict[str, int]:
@@ -2798,15 +2819,20 @@ def _normalized_auto_check_config(cfg: AutoCheckConfig | dict[str, int]) -> dict
         interval = cfg.interval
         threshold = cfg.threshold
         min_low = cfg.min_low
+        target_seats = cfg.target_seats
+        if target_seats is None:
+            target_seats = _auto_check_config.get("target_seats", _DEFAULT_TARGET_SEATS)
     else:
         interval = cfg.get("interval", _auto_check_config.get("interval", _DEFAULT_INTERVAL))
         threshold = cfg.get("threshold", _auto_check_config.get("threshold", _DEFAULT_THRESHOLD))
         min_low = cfg.get("min_low", _auto_check_config.get("min_low", _DEFAULT_MIN_LOW))
+        target_seats = cfg.get("target_seats", _auto_check_config.get("target_seats", _DEFAULT_TARGET_SEATS))
 
     return {
         "interval": max(60, int(interval)),
         "threshold": max(1, min(100, int(threshold))),
         "min_low": max(1, int(min_low)),
+        "target_seats": max(1, int(target_seats)),
     }
 
 
@@ -2828,6 +2854,7 @@ def set_auto_check_config(cfg: AutoCheckConfig):
         "AUTO_CHECK_INTERVAL": str(normalized["interval"]),
         "AUTO_CHECK_THRESHOLD": str(normalized["threshold"]),
         "AUTO_CHECK_MIN_LOW": str(normalized["min_low"]),
+        "AUTO_CHECK_TARGET_SEATS": str(normalized["target_seats"]),
     }
     for key, value in persisted.items():
         os.environ[key] = value
@@ -2836,8 +2863,9 @@ def set_auto_check_config(cfg: AutoCheckConfig):
     _sync_runtime_env_reload_state()
     _auto_check_restart.set()  # 唤醒巡检线程，立即应用新配置
     logger.info(
-        "[巡检] 配置已更新并持久化: 间隔=%ds 阈值=%d%% 触发=%d个",
+        "[巡检] 配置已更新并持久化: 间隔=%ds 目标=%d 阈值=%d%% 触发=%d个",
         _auto_check_config["interval"],
+        _auto_check_config["target_seats"],
         _auto_check_config["threshold"],
         _auto_check_config["min_low"],
     )
