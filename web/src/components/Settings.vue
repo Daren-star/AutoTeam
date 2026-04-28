@@ -337,7 +337,7 @@
         <span v-if="saved" class="text-xs text-green-400 transition">已保存</span>
       </div>
 
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div>
           <label class="block text-sm text-gray-400 mb-1">巡检间隔</label>
           <div class="flex items-center gap-2">
@@ -362,11 +362,19 @@
             <span class="text-sm text-gray-500 shrink-0">个</span>
           </div>
         </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">目标席位</label>
+          <div class="flex items-center gap-2">
+            <input v-model.number="form.target_seats" type="number" min="1"
+              class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" />
+            <span class="text-sm text-gray-500 shrink-0">席</span>
+          </div>
+        </div>
       </div>
 
       <div class="mt-3 flex items-center justify-between gap-3">
         <p class="text-xs text-gray-500">
-          每 {{ form.interval }} 分钟检查一次，{{ form.min_low }} 个以上账号剩余低于 {{ form.threshold }}% 时自动轮转
+          每 {{ form.interval }} 分钟检查一次，维护 {{ form.target_seats }} 个席位，{{ form.min_low }} 个以上账号剩余低于 {{ form.threshold }}% 时自动轮转
         </p>
         <button @click="save" :disabled="saving"
           class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition disabled:opacity-50">
@@ -398,7 +406,7 @@ const props = defineProps({
 
 const emit = defineEmits(['refresh', 'admin-progress'])
 
-const form = ref({ interval: 5, threshold: 10, min_low: 2 })
+const form = ref({ interval: 5, threshold: 10, min_low: 2, target_seats: 5 })
 const saving = ref(false)
 const saved = ref(false)
 
@@ -485,6 +493,7 @@ async function loadAutoCheckConfig() {
       interval: Math.round(cfg.interval / 60),
       threshold: cfg.threshold,
       min_low: cfg.min_low,
+      target_seats: cfg.target_seats ?? 5,
     }
   } catch (e) {
     console.error('加载巡检配置失败:', e)
@@ -701,11 +710,13 @@ async function save() {
       interval: form.value.interval * 60,
       threshold: form.value.threshold,
       min_low: form.value.min_low,
+      target_seats: form.value.target_seats,
     })
     form.value = {
       interval: Math.round(cfg.interval / 60),
       threshold: cfg.threshold,
       min_low: cfg.min_low,
+      target_seats: cfg.target_seats ?? form.value.target_seats,
     }
     saved.value = true
     setTimeout(() => { saved.value = false }, 3000)
