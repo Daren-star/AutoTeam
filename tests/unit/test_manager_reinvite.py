@@ -4,7 +4,7 @@ from autoteam import accounts, manager
 
 
 def test_reinvite_account_uses_unified_oauth_login_and_marks_active(monkeypatch):
-    updates = []
+    events = []
 
     monkeypatch.setattr(
         manager,
@@ -20,11 +20,12 @@ def test_reinvite_account_uses_unified_oauth_login_and_marks_active(monkeypatch)
     monkeypatch.setattr(
         manager,
         "update_account",
-        lambda email, **kwargs: updates.append((email, kwargs)),
+        lambda email, **kwargs: events.append(("update", email, kwargs)),
     )
     monkeypatch.setattr(
-        manager, "_auth_repair_reset", lambda email: updates.append((email, {"_auth_repair_reset": True}))
+        manager, "_auth_repair_reset", lambda email: events.append(("auth_repair_reset", email))
     )
+    monkeypatch.setattr(manager, "sync_to_cpa", lambda: events.append(("sync_to_cpa", None)))
     monkeypatch.setattr(manager.time, "time", lambda: 1234567890)
     monkeypatch.setattr(
         manager,
@@ -39,8 +40,9 @@ def test_reinvite_account_uses_unified_oauth_login_and_marks_active(monkeypatch)
     )
 
     assert result is True
-    assert updates == [
+    assert events == [
         (
+            "update",
             "tmp-user@example.com",
             {
                 "status": accounts.STATUS_ACTIVE,
@@ -48,7 +50,76 @@ def test_reinvite_account_uses_unified_oauth_login_and_marks_active(monkeypatch)
                 "auth_file": "/tmp/tmp-user@example.com.json",
             },
         ),
-        ("tmp-user@example.com", {"_auth_repair_reset": True}),
+        ("auth_repair_reset", "tmp-user@example.com"),
+        ("sync_to_cpa", None),
+    ]
+
+
+def test_create_account_direct_syncs_to_cpa_after_successful_registration(monkeypatch):
+    events = []
+
+    class FakeMailClient:
+        provider_name = "cloudmail"
+
+        def create_temp_email(self):
+            return 42, "new-user@example.com"
+
+        def delete_account(self, _account_id):
+            raise AssertionError("successful direct registration must not delete temp email")
+
+    monkeypatch.setattr(manager, "_register_direct_once", lambda *args, **kwargs: True)
+    monkeypatch.setattr(manager, "_is_email_in_team", lambda email: False)
+    monkeypatch.setattr(
+        manager,
+        "add_account",
+        lambda email, password, **kwargs: events.append(("add_account", email, kwargs)),
+    )
+    monkeypatch.setattr(
+        manager,
+        "login_codex_via_browser",
+        lambda email, password, mail_client=None, return_result=False: {
+            "email": email,
+            "access_token": "token-1",
+            "refresh_token": "refresh-1",
+            "plan_type": "team",
+        },
+    )
+    monkeypatch.setattr(manager, "save_auth_file", lambda bundle: f"/tmp/{bundle['email']}.json")
+    monkeypatch.setattr(
+        manager,
+        "update_account",
+        lambda email, **kwargs: events.append(("update", email, kwargs)),
+    )
+    monkeypatch.setattr(
+        manager, "_auth_repair_reset", lambda email: events.append(("auth_repair_reset", email))
+    )
+    monkeypatch.setattr(manager, "sync_to_cpa", lambda: events.append(("sync_to_cpa", None)))
+    monkeypatch.setattr(manager.time, "time", lambda: 1234567890)
+
+    result = manager.create_account_direct(FakeMailClient())
+
+    assert result == "new-user@example.com"
+    assert events == [
+        (
+            "add_account",
+            "new-user@example.com",
+            {
+                "cloudmail_account_id": 42,
+                "mail_provider": "cloudmail",
+                "mail_account_id": 42,
+            },
+        ),
+        (
+            "update",
+            "new-user@example.com",
+            {
+                "status": accounts.STATUS_ACTIVE,
+                "auth_file": "/tmp/new-user@example.com.json",
+                "last_active_at": 1234567890,
+            },
+        ),
+        ("auth_repair_reset", "new-user@example.com"),
+        ("sync_to_cpa", None),
     ]
 
 

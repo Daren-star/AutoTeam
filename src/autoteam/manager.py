@@ -80,6 +80,13 @@ MAIL_TIMEOUT = int(os.environ.get("MAIL_TIMEOUT", "180"))
 REUSE_RESET_GRACE_SECONDS = int(os.environ.get("REUSE_RESET_GRACE_SECONDS", "300"))
 
 
+def _sync_to_cpa_best_effort(context: str):
+    try:
+        sync_to_cpa()
+    except Exception as exc:
+        logger.warning("[CPA] %s 后即时同步失败，稍后总同步会再次对齐: %s", context, exc)
+
+
 def _chatgpt_session_ready(chatgpt_api) -> bool:
     if not chatgpt_api:
         return False
@@ -1946,6 +1953,7 @@ def create_account_direct(mail_client):
         auth_file = save_auth_file(bundle)
         update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
         _auth_repair_reset(email)
+        _sync_to_cpa_best_effort(f"直接注册账号就绪: {email}")
         logger.info("[直接注册] 账号就绪: %s", email)
         return email
     else:
@@ -2025,6 +2033,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
     auth_file = save_auth_file(bundle)
     update_account(email, status=STATUS_ACTIVE, last_active_at=time.time(), auth_file=auth_file)
     _auth_repair_reset(email)
+    _sync_to_cpa_best_effort(f"旧账号恢复成功: {email}")
     logger.info("[轮转] 旧账号已恢复: %s", email)
     return True
 
