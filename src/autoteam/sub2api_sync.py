@@ -700,6 +700,35 @@ def _delete_account(token: str, account: dict, *, label: str = "删除账号") -
     return True
 
 
+def _find_managed_account_by_email(items: list[dict], email: str, *, kind: str | None = None) -> dict | None:
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+
+    matches = []
+    fallback = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if _managed_email(item) != email:
+            continue
+        if kind is None or _is_managed_account(item, kind=kind):
+            matches.append(item)
+        elif not _is_managed_account(item):
+            fallback.append(item)
+        else:
+            continue
+
+    candidates = matches or fallback
+    if not candidates:
+        return None
+
+    try:
+        return max(candidates, key=lambda item: int(item.get("id") or 0))
+    except Exception:
+        return candidates[-1]
+
+
 def verify_sub2api_connection() -> bool:
     try:
         token = _login()
@@ -717,6 +746,79 @@ def verify_sub2api_connection() -> bool:
     except Exception as exc:
         logger.error("[验证] Sub2API 连接失败: %s", exc)
         return False
+
+
+def sync_auth_file_to_sub2api(filepath, *, quota_info: dict | None = None):
+    """只同步单个认证文件到 Sub2API。"""
+    auth_path = Path(filepath)
+    if not auth_path.exists():
+        raise FileNotFoundError(f"认证文件不存在: {auth_path}")
+
+    auth_data = _load_auth_data(auth_path)
+    email = (auth_data.get("email") or "").strip().lower()
+    if not email:
+        raise RuntimeError("[Sub2API] 认证文件缺少邮箱，无法同步")
+
+    token = _login()
+    group_ids, group_names = _resolve_group_binding(token)
+    remote_accounts = _list_openai_oauth_accounts(token)
+    current = _find_managed_account_by_email(remote_accounts, email, kind=_KIND_POOL)
+
+    desired_credentials = _build_credentials(auth_data)
+    desired_extra = _build_extra(
+        email,
+        auth_path.name,
+        kind=_KIND_POOL,
+        quota_info=quota_info if isinstance(quota_info, dict) else None,
+    )
+    _attach_group_metadata(desired_extra, group_ids, group_names)
+
+    overwrite_account_settings = SUB2API_OVERWRITE_ACCOUNT_SETTINGS
+    if current:
+        merged_credentials = dict(current.get("credentials") or {})
+        merged_credentials.update(desired_credentials)
+        merged_extra = dict(current.get("extra") or {})
+        merged_extra.update(desired_extra)
+        account_settings = None
+        if overwrite_account_settings:
+            account_settings = _build_account_settings()
+            _apply_managed_credentials_settings(merged_credentials)
+            _apply_managed_extra_settings(merged_extra)
+        _update_account(
+            token,
+            current,
+            credentials=merged_credentials,
+            extra=merged_extra,
+            status="active" if current.get("status") != "active" else None,
+            group_ids=_merge_group_ids(current, group_ids),
+            account_settings=account_settings,
+        )
+        logger.info("[Sub2API] 单文件更新: %s", email)
+        return {
+            "updated": email,
+            "account_id": current.get("id"),
+            "auth_file": _remote_auth_file_name(auth_path.name),
+        }
+
+    proxy_id = _resolve_proxy_id(token) if SUB2API_PROXY else None
+    _apply_managed_credentials_settings(desired_credentials)
+    _apply_managed_extra_settings(desired_extra)
+    created = _create_account(
+        token,
+        name=email,
+        credentials=desired_credentials,
+        extra=desired_extra,
+        label=f"创建账号 {email}",
+        group_ids=group_ids,
+        account_settings=_build_account_settings(),
+        proxy_id=proxy_id,
+    )
+    logger.info("[Sub2API] 单文件创建: %s", email)
+    return {
+        "created": email,
+        "account_id": created.get("id") if isinstance(created, dict) else None,
+        "auth_file": _remote_auth_file_name(auth_path.name),
+    }
 
 
 def sync_to_sub2api():

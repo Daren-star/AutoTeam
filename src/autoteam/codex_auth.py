@@ -113,6 +113,90 @@ def _account_deactivated_failure_result(page):
     }
 
 
+def _add_phone_failure_result(page):
+    try:
+        current_url = page.url
+    except Exception:
+        return None
+    if "add-phone" not in (current_url or "").lower():
+        return None
+
+    body_excerpt = _page_excerpt(page)
+    error_type, error_detail, retryable = _classify_oauth_failure(current_url, body_excerpt)
+    if error_type != "add_phone":
+        return None
+    return {
+        "ok": False,
+        "bundle": None,
+        "error_type": error_type,
+        "error_detail": error_detail,
+        "retryable": retryable,
+        "current_url": current_url,
+        "body_excerpt": body_excerpt,
+    }
+
+
+def _is_terminal_oauth_failure(result):
+    return isinstance(result, dict) and result.get("error_type") in {"account_deactivated", "add_phone"}
+
+
+def _terminal_oauth_failure_result(page):
+    return _add_phone_failure_result(page) or _account_deactivated_failure_result(page)
+
+
+def _log_terminal_oauth_failure(email, result, prefix="登录流程"):
+    if not _is_terminal_oauth_failure(result):
+        return
+    if result.get("error_type") == "add_phone":
+        logger.error("[Codex] %s进入手机号验证页，停止本轮登录: %s", prefix, email)
+    else:
+        logger.error("[Codex] %s提示账号被封禁/停用，停止重试: %s", prefix, email)
+
+
+def _is_no_valid_organizations_error(page):
+    try:
+        if "no_valid_organizations" in (page.url or "").lower():
+            return True
+    except Exception:
+        pass
+
+    return "no_valid_organizations" in _page_excerpt(page, limit=1000).lower()
+
+
+def _click_no_valid_organizations_retry(page):
+    if not _is_no_valid_organizations_error(page):
+        return False
+
+    retry_labels = ("重试", "Retry", "Try again")
+    for label in retry_labels:
+        label_re = re.compile(rf"^{re.escape(label)}$", re.I)
+        try:
+            btn = page.get_by_role("button", name=label_re).first
+            if btn.is_visible(timeout=1000):
+                btn.click()
+                return True
+        except Exception:
+            pass
+
+    for selector in (
+        'button:has-text("重试")',
+        'button:has-text("Retry")',
+        'button:has-text("Try again")',
+        '[role="button"]:has-text("重试")',
+        '[role="button"]:has-text("Retry")',
+        '[role="button"]:has-text("Try again")',
+    ):
+        try:
+            btn = page.locator(selector).first
+            if btn.is_visible(timeout=1000):
+                btn.click()
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
 def _build_auth_url(code_challenge, state):
     params = {
         "client_id": CODEX_CLIENT_ID,
@@ -305,6 +389,12 @@ def _is_otp_input_visible(page, timeout=500):
 
 def _detect_otp_error(page):
     try:
+        if "add-phone" in (page.url or "").lower():
+            return "add_phone"
+    except Exception:
+        pass
+
+    try:
         body = page.locator("body").inner_text(timeout=1500).lower().replace("\n", " ")
     except Exception:
         return None
@@ -323,6 +413,7 @@ def _wait_for_otp_submit_result(page, timeout=12):
     - accepted: 验证码输入框已消失 / 页面已前进
     - invalid: 页面明确提示验证码错误
     - account_deactivated: 页面明确提示账号被封禁/停用
+    - add_phone: 页面跳转到手机号验证
     - pending: 既没报错也没明显前进（常见于页面较慢或状态未稳定）
     """
     deadline = time.time() + timeout
@@ -330,8 +421,8 @@ def _wait_for_otp_submit_result(page, timeout=12):
     while time.time() < deadline:
         err = _detect_otp_error(page)
         if err:
-            if err == "account_deactivated":
-                return "account_deactivated", err
+            if err in {"account_deactivated", "add_phone"}:
+                return err, err
             return "invalid", err
         if not _is_otp_input_visible(page, timeout=250):
             return "accepted", None
@@ -339,8 +430,8 @@ def _wait_for_otp_submit_result(page, timeout=12):
 
     err = _detect_otp_error(page)
     if err:
-        if err == "account_deactivated":
-            return "account_deactivated", err
+        if err in {"account_deactivated", "add_phone"}:
+            return err, err
         return "invalid", err
     return "pending", None
 
@@ -476,6 +567,7 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
 
     auth_code = None
     failure_result = None
+    no_valid_organizations_retried = False
 
     with sync_playwright() as p:
         browser = p.chromium.launch(**get_playwright_launch_options())
@@ -738,7 +830,20 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
                 page.locator(
                     'button:has-text("Continue"), button:has-text("继续"), button[type="submit"]'
                 ).first.click()
-                time.sleep(5)
+                submit_status, _submit_detail = _wait_for_otp_submit_result(page, timeout=12)
+                if submit_status == "add_phone":
+                    failure_result = _add_phone_failure_result(page)
+                    _log_terminal_oauth_failure(email, failure_result, "验证码提交后")
+                elif submit_status == "account_deactivated":
+                    failure_result = _account_deactivated_failure_result(page)
+                    _log_terminal_oauth_failure(email, failure_result, "验证码提交后")
+                elif submit_status == "accepted":
+                    time.sleep(2)
+                elif submit_status == "pending":
+                    time.sleep(5)
+                if not _is_terminal_oauth_failure(failure_result):
+                    failure_result = _terminal_oauth_failure_result(page)
+                    _log_terminal_oauth_failure(email, failure_result, "验证码提交后")
                 _screenshot(page, "codex_03c_after_otp.png")
             else:
                 logger.warning("[Codex] 未获取到验证码")
@@ -746,7 +851,7 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
             logger.warning("[Codex] 需要验证码但无 mail_client，无法自动获取")
 
         # 处理 about-you 页面（可能出现在 OAuth 流程中）
-        if "about-you" in page.url:
+        if not _is_terminal_oauth_failure(failure_result) and "about-you" in page.url:
             logger.info("[Codex] 检测到 about-you 页面，填写个人信息...")
             try:
                 name_input = page.locator('input[name="name"]').first
@@ -785,6 +890,8 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
                 time.sleep(5)
                 _screenshot(page, "codex_03d_after_aboutyou.png")
                 logger.info("[Codex] about-you 完成，当前 URL: %s", page.url)
+                failure_result = _terminal_oauth_failure_result(page)
+                _log_terminal_oauth_failure(email, failure_result, "about-you 提交后")
             except Exception as e:
                 logger.error("[Codex] about-you 处理失败: %s", e)
 
@@ -792,14 +899,16 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
         for step in range(10):
             if auth_code:
                 break
+            if _is_terminal_oauth_failure(failure_result):
+                break
 
             _screenshot(page, f"codex_04_step{step + 1}_before.png")
 
             # 在任何页面中，如果有 workspace/组织选择，先选 Team
             try:
-                failure_result = _account_deactivated_failure_result(page)
+                failure_result = _terminal_oauth_failure_result(page)
                 if failure_result:
-                    logger.error("[Codex] 登录页提示账号被封禁/停用，停止重试: %s", email)
+                    _log_terminal_oauth_failure(email, failure_result)
                     break
 
                 workspace_name = get_chatgpt_workspace_name()
@@ -930,6 +1039,11 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
                                 _used_email_ids.add(otp_email_id)
                                 logger.error("[Codex] 验证码提交后账号被封禁/停用，停止重试: %s", email)
                                 break
+                            if submit_status == "add_phone":
+                                failure_result = _add_phone_failure_result(page)
+                                _used_email_ids.add(otp_email_id)
+                                logger.error("[Codex] 验证码提交后进入手机号验证页，停止本轮登录: %s", email)
+                                break
                             if submit_status == "invalid":
                                 _used_email_ids.add(otp_email_id)
                                 detail_suffix = f"，命中提示: {submit_detail}" if submit_detail else ""
@@ -959,7 +1073,7 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
 
                         if submit_ok:
                             _used_email_ids.add(otp_email_id)
-                        if failure_result and failure_result.get("error_type") == "account_deactivated":
+                        if _is_terminal_oauth_failure(failure_result):
                             break
                         continue
                     if page_left_code:
@@ -967,8 +1081,17 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
             except Exception:
                 pass
 
-            if failure_result and failure_result.get("error_type") == "account_deactivated":
+            if _is_terminal_oauth_failure(failure_result):
                 break
+
+            if not no_valid_organizations_retried and _is_no_valid_organizations_error(page):
+                logger.warning("[Codex] consent 页出现 no_valid_organizations，自动点击 Retry 一次")
+                no_valid_organizations_retried = True
+                if _click_no_valid_organizations_retry(page):
+                    time.sleep(5)
+                    _screenshot(page, f"codex_04_no_valid_organizations_retry_{step + 1}.png")
+                    continue
+                logger.warning("[Codex] 未找到 no_valid_organizations Retry 按钮，继续走现有失败流程")
 
             try:
                 consent_btn = page.locator(
@@ -979,6 +1102,10 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
                     consent_btn.click()
                     time.sleep(5)
                     _screenshot(page, f"codex_04_consent_{step + 1}.png")
+                    failure_result = _terminal_oauth_failure_result(page)
+                    if _is_terminal_oauth_failure(failure_result):
+                        _log_terminal_oauth_failure(email, failure_result, "授权点击后")
+                        break
                 else:
                     break
             except Exception:
@@ -988,7 +1115,7 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
         for _ in range(30):
             if auth_code:
                 break
-            if failure_result and failure_result.get("error_type") == "account_deactivated":
+            if _is_terminal_oauth_failure(failure_result):
                 break
             # 也从当前 URL 尝试提取（CPA 可能接收了回调）
             try:
@@ -1187,6 +1314,11 @@ class SessionCodexAuthFlow:
             if self.auth_code:
                 return "completed", None
 
+        if self.page:
+            failure_result = _terminal_oauth_failure_result(self.page)
+            if _is_terminal_oauth_failure(failure_result):
+                return failure_result["error_type"], failure_result["error_detail"]
+
         if self._visible_locator(self.CODE_SELECTORS, timeout_ms=800):
             return "code_required", None
         if self._visible_locator(self.PASSWORD_SELECTORS, timeout_ms=800):
@@ -1353,6 +1485,9 @@ class SessionCodexAuthFlow:
                     "step": "unsupported_password",
                     "detail": "主号 Codex 当前停留在密码页，且未找到一次性验证码入口",
                 }
+
+            if step in {"account_deactivated", "add_phone"}:
+                return {"step": step, "detail": detail}
 
             if step == "email_required":
                 if self._auto_fill_email():

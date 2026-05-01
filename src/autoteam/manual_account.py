@@ -26,7 +26,7 @@ from autoteam.codex_auth import (
     quota_result_resets_at,
     save_auth_file,
 )
-from autoteam.sync_targets import sync_to_configured_targets as sync_to_cpa
+from autoteam.sync_targets import sync_auth_file_to_configured_targets as sync_auth_file_to_targets
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +261,7 @@ class ManualAccountFlow:
                 update_fields["quota_resets_at"] = quota_result_resets_at(quota_info) or int(time.time() + 18000)
 
         update_account(email, **update_fields)
-        sync_to_cpa()
+        sync_auth_file_to_targets(auth_file, quota_info=update_fields.get("last_quota"))
 
         return {
             "status": "completed",

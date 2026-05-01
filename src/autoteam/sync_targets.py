@@ -145,6 +145,23 @@ def sync_main_codex_to_configured_targets(filepath: str):
     return results
 
 
+def sync_auth_file_to_configured_targets(filepath: str, *, quota_info: dict | None = None):
+    results = {}
+    enabled_targets = get_enabled_sync_targets()
+
+    if SYNC_TARGET_CPA in enabled_targets:
+        from autoteam.cpa_sync import sync_auth_file_to_cpa
+
+        results[SYNC_TARGET_CPA] = sync_auth_file_to_cpa(filepath)
+
+    if SYNC_TARGET_SUB2API in enabled_targets:
+        from autoteam.sub2api_sync import sync_auth_file_to_sub2api
+
+        results[SYNC_TARGET_SUB2API] = sync_auth_file_to_sub2api(filepath, quota_info=quota_info)
+
+    return results
+
+
 def delete_main_codex_from_configured_targets(*, include_disabled: bool = False):
     results = {}
     targets = get_available_sync_targets() if include_disabled else get_enabled_sync_targets()

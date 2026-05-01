@@ -1910,6 +1910,7 @@ def post_account_login(params: LoginAccountParams):
             quota_result_resets_at,
             save_auth_file,
         )
+        from autoteam.sync_targets import sync_auth_file_to_configured_targets
         from autoteam.mail_provider import get_mail_client_for_account
 
         mail_client = get_mail_client_for_account(acc)
@@ -1921,6 +1922,7 @@ def post_account_login(params: LoginAccountParams):
                 raise RuntimeError(f"登录后 plan={plan_type or 'unknown'}，未进入 Team workspace")
             auth_file = save_auth_file(bundle)
             update_account(email, auth_file=auth_file)
+            quota_snapshot = None
             # 登录成功且是 team plan，自动标记为 active
             if plan_type == "team":
                 update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
@@ -1930,10 +1932,12 @@ def post_account_login(params: LoginAccountParams):
                     st, info = check_codex_quota(token)
                     if st == "ok" and isinstance(info, dict):
                         update_account(email, last_quota=info)
+                        quota_snapshot = info
                     elif st == "exhausted":
                         quota_info = quota_result_quota_info(info)
                         if quota_info:
                             update_account(email, last_quota=quota_info)
+                            quota_snapshot = quota_info
                         update_account(
                             email,
                             status="exhausted",
@@ -1941,9 +1945,7 @@ def post_account_login(params: LoginAccountParams):
                             quota_resets_at=quota_result_resets_at(info) or int(time.time() + 18000),
                         )
             # 同步到已启用远端
-            from autoteam.sync_targets import sync_to_configured_targets as sync_to_cpa
-
-            sync_to_cpa()
+            sync_auth_file_to_configured_targets(auth_file, quota_info=quota_snapshot)
             return {"email": email, "plan": bundle.get("plan_type"), "auth_file": auth_file}
         raise RuntimeError(f"Codex 登录失败: {email}")
 

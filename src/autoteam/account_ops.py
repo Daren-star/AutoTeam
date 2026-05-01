@@ -150,7 +150,6 @@ def delete_managed_account(
         remote_cleanup = delete_account_from_configured_targets(
             email,
             auth_names=list(cleanup["local_auth_files"]),
-            include_disabled=True,
         )
         cleanup["cpa_files"] = list((remote_cleanup.get("cpa") or {}).get("deleted", []))
         cleanup["sub2api_accounts"] = list((remote_cleanup.get("sub2api") or {}).get("deleted", []))

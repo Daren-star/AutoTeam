@@ -54,6 +54,38 @@ def upload_to_cpa(filepath):
         return False
 
 
+def sync_auth_file_to_cpa(filepath):
+    """只同步单个认证文件到 CPA。"""
+    filepath = Path(filepath)
+    if not filepath.exists():
+        raise FileNotFoundError(f"认证文件不存在: {filepath}")
+
+    try:
+        auth_data = json.loads(filepath.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"[CPA] 读取认证文件失败: {filepath.name}") from exc
+
+    email = str(auth_data.get("email") or "").strip().lower()
+    deleted = []
+    seen = set()
+    for item in list_cpa_files():
+        item_name = str(item.get("name") or "").strip()
+        item_email = str(item.get("email") or "").strip().lower()
+        if not item_name or item_name in seen:
+            continue
+        if not ((email and item_email == email) or item_name == filepath.name):
+            continue
+        if delete_from_cpa(item_name):
+            deleted.append(item_name)
+        seen.add(item_name)
+
+    if not upload_to_cpa(filepath):
+        raise RuntimeError(f"[CPA] 单文件上传失败: {filepath.name}")
+
+    logger.info("[CPA] 单文件同步完成: %s", filepath.name)
+    return {"uploaded": filepath.name, "deleted": deleted, "count": len(deleted)}
+
+
 def delete_from_cpa(name):
     """从 CPA 删除认证文件"""
     resp = requests.delete(

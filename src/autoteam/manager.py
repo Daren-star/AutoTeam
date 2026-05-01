@@ -67,6 +67,7 @@ from autoteam.mail_provider import (
     get_mail_client as CloudMailClient,
 )
 from autoteam.sync_targets import (
+    sync_auth_file_to_configured_targets as sync_auth_file_to_targets,
     sync_main_codex_to_configured_targets as sync_main_codex_to_cpa,
 )
 from autoteam.sync_targets import (
@@ -84,7 +85,14 @@ def _sync_to_cpa_best_effort(context: str):
     try:
         sync_to_cpa()
     except Exception as exc:
-        logger.warning("[CPA] %s 后即时同步失败，稍后总同步会再次对齐: %s", context, exc)
+        logger.warning("[远端同步] %s 后即时同步失败，稍后总同步会再次对齐: %s", context, exc)
+
+
+def _sync_auth_file_best_effort(auth_file: str, context: str, *, quota_info: dict | None = None):
+    try:
+        sync_auth_file_to_targets(auth_file, quota_info=quota_info)
+    except Exception as exc:
+        logger.warning("[远端同步] %s 后单文件同步失败，稍后总同步会再次对齐: %s", context, exc)
 
 
 def _chatgpt_session_ready(chatgpt_api) -> bool:
@@ -259,12 +267,21 @@ def _auth_repair_reset(email: str):
     update_account(email, **_auth_repair_reset_fields())
 
 
-def _is_account_deactivated_login_result(result: dict | None) -> bool:
-    return isinstance(result, dict) and result.get("error_type") == ACCOUNT_DEACTIVATED_ERROR_TYPE
+def _is_terminal_auth_delete_login_result(result: dict | None) -> bool:
+    return isinstance(result, dict) and result.get("error_type") in {ACCOUNT_DEACTIVATED_ERROR_TYPE, "add_phone"}
 
 
-def _delete_account_deactivated_account(email: str, *, mail_client=None, chatgpt_api=None):
-    logger.error("[%s] 账号已被封禁/停用，删除账号并停止自动重试", email)
+def _delete_account_deactivated_account(
+    email: str,
+    *,
+    mail_client=None,
+    chatgpt_api=None,
+    error_type: str = ACCOUNT_DEACTIVATED_ERROR_TYPE,
+):
+    if error_type == "add_phone":
+        logger.error("[%s] 账号进入手机号验证页，删除账号并停止自动重试", email)
+    else:
+        logger.error("[%s] 账号已被封禁/停用，删除账号并停止自动重试", email)
     try:
         return delete_managed_account(
             email,
@@ -275,8 +292,12 @@ def _delete_account_deactivated_account(email: str, *, mail_client=None, chatgpt
             mail_client=mail_client,
         )
     except Exception as exc:
-        logger.error("[%s] 账号封禁/停用后的删除流程失败，暂停自动重试: %s", email, exc)
-        _record_auth_repair_failure(email, ACCOUNT_DEACTIVATED_ERROR_TYPE, f"账号已封禁/停用，删除失败: {exc}")
+        if error_type == "add_phone":
+            logger.error("[%s] 手机号验证后的删除流程失败，暂停自动重试: %s", email, exc)
+            _record_auth_repair_failure(email, "add_phone", f"账号进入手机号验证页，删除失败: {exc}")
+        else:
+            logger.error("[%s] 账号封禁/停用后的删除流程失败，暂停自动重试: %s", email, exc)
+            _record_auth_repair_failure(email, ACCOUNT_DEACTIVATED_ERROR_TYPE, f"账号已封禁/停用，删除失败: {exc}")
         return None
 
 
@@ -970,8 +991,12 @@ def cmd_check(force_auth_repair=False):
                 mail_client.login()
                 mail_clients[provider] = mail_client
             login_result = _login_codex_with_result(email, password, mail_client=mail_client)
-            if _is_account_deactivated_login_result(login_result):
-                _delete_account_deactivated_account(email, mail_client=mail_client)
+            if _is_terminal_auth_delete_login_result(login_result):
+                _delete_account_deactivated_account(
+                    email,
+                    mail_client=mail_client,
+                    error_type=login_result.get("error_type") or ACCOUNT_DEACTIVATED_ERROR_TYPE,
+                )
                 continue
 
             bundle = login_result.get("bundle")
@@ -982,10 +1007,13 @@ def cmd_check(force_auth_repair=False):
                 logger.info("[%s] token 已更新", email)
                 # 重新检查额度
                 status_str, info = _check_and_refresh(find_account(load_accounts(), email))
+                should_sync_account = False
+                quota_snapshot = None
                 if status_str == "exhausted":
                     quota_info = quota_result_quota_info(info)
                     if quota_info:
                         update_account(email, last_quota=quota_info)
+                        quota_snapshot = quota_info
                     update_account(
                         email,
                         status=STATUS_EXHAUSTED,
@@ -994,9 +1022,11 @@ def cmd_check(force_auth_repair=False):
                     )
                     exhausted_list.append(acc)
                     logger.warning("[%s] 额度已用完", email)
+                    should_sync_account = True
                 elif status_str == "ok" and isinstance(info, dict):
                     p_remain = 100 - info.get("primary_pct", 0)
                     update_account(email, last_quota=info)
+                    quota_snapshot = info
                     if p_remain < threshold:
                         resets_at = info.get("primary_resets_at") or (time.time() + 18000)
                         logger.warning("[%s] 5h剩余 %d%% < %d%%，标记为 exhausted", email, p_remain, threshold)
@@ -1007,14 +1037,17 @@ def cmd_check(force_auth_repair=False):
                             quota_resets_at=resets_at,
                         )
                         exhausted_list.append(acc)
+                        should_sync_account = True
                     else:
                         _auth_repair_reset(email)
                         update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
                         logger.info("[%s] 额度可用 (%d%%)", email, p_remain)
+                        should_sync_account = True
                 elif status_str == "ok":
                     _auth_repair_reset(email)
                     update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
                     logger.info("[%s] 额度可用", email)
+                    should_sync_account = True
                 elif status_str == "auth_error":
                     final_status = _set_auth_pending_or_standby(email)
                     state = _record_auth_repair_failure(
@@ -1029,6 +1062,8 @@ def cmd_check(force_auth_repair=False):
                         final_status,
                         extra,
                     )
+                if should_sync_account:
+                    _sync_auth_file_best_effort(auth_file, f"认证修复账号状态更新: {email}", quota_info=quota_snapshot)
             else:
                 final_status = _set_auth_pending_or_standby(email)
                 state = _record_auth_repair_failure(
@@ -1134,8 +1169,12 @@ def _complete_registration(email, password, invite_link, mail_client):
 
     # Codex 登录
     login_result = _login_codex_with_result(email, password, mail_client=mail_client)
-    if _is_account_deactivated_login_result(login_result):
-        _delete_account_deactivated_account(email, mail_client=mail_client)
+    if _is_terminal_auth_delete_login_result(login_result):
+        _delete_account_deactivated_account(
+            email,
+            mail_client=mail_client,
+            error_type=login_result.get("error_type") or ACCOUNT_DEACTIVATED_ERROR_TYPE,
+        )
         return None
 
     bundle = login_result.get("bundle")
@@ -1143,6 +1182,7 @@ def _complete_registration(email, password, invite_link, mail_client):
         auth_file = save_auth_file(bundle)
         update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
         _auth_repair_reset(email)
+        _sync_auth_file_best_effort(auth_file, f"pending 邀请账号就绪: {email}")
         logger.info("[注册] 账号就绪: %s", email)
         return email
     else:
@@ -1944,8 +1984,12 @@ def create_account_direct(mail_client):
 
     # Step 4: Codex 登录
     login_result = _login_codex_with_result(email, password, mail_client=mail_client)
-    if _is_account_deactivated_login_result(login_result):
-        _delete_account_deactivated_account(email, mail_client=mail_client)
+    if _is_terminal_auth_delete_login_result(login_result):
+        _delete_account_deactivated_account(
+            email,
+            mail_client=mail_client,
+            error_type=login_result.get("error_type") or ACCOUNT_DEACTIVATED_ERROR_TYPE,
+        )
         return None
 
     bundle = login_result.get("bundle")
@@ -1953,7 +1997,7 @@ def create_account_direct(mail_client):
         auth_file = save_auth_file(bundle)
         update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
         _auth_repair_reset(email)
-        _sync_to_cpa_best_effort(f"直接注册账号就绪: {email}")
+        _sync_auth_file_best_effort(auth_file, f"直接注册账号就绪: {email}")
         logger.info("[直接注册] 账号就绪: %s", email)
         return email
     else:
@@ -2004,8 +2048,13 @@ def reinvite_account(chatgpt_api, mail_client, acc):
         chatgpt_api.stop()
 
     login_result = _login_codex_with_result(email, password, mail_client=mail_client)
-    if _is_account_deactivated_login_result(login_result):
-        _delete_account_deactivated_account(email, mail_client=mail_client, chatgpt_api=chatgpt_api)
+    if _is_terminal_auth_delete_login_result(login_result):
+        _delete_account_deactivated_account(
+            email,
+            mail_client=mail_client,
+            chatgpt_api=chatgpt_api,
+            error_type=login_result.get("error_type") or ACCOUNT_DEACTIVATED_ERROR_TYPE,
+        )
         return False
 
     bundle = login_result.get("bundle")
@@ -2033,7 +2082,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
     auth_file = save_auth_file(bundle)
     update_account(email, status=STATUS_ACTIVE, last_active_at=time.time(), auth_file=auth_file)
     _auth_repair_reset(email)
-    _sync_to_cpa_best_effort(f"旧账号恢复成功: {email}")
+    _sync_auth_file_best_effort(auth_file, f"旧账号恢复成功: {email}")
     logger.info("[轮转] 旧账号已恢复: %s", email)
     return True
 
@@ -2440,7 +2489,7 @@ def cmd_add():
         result = create_new_account(chatgpt, mail_client)  # 内部会 stop chatgpt
         if result:
             logger.info("[添加] 新账号添加成功: %s", result)
-            sync_to_cpa()
+            logger.info("[添加] 单账号远端同步已在创建成功时完成")
         else:
             logger.error("[添加] 添加失败")
     finally:

@@ -111,3 +111,53 @@ def test_delete_managed_account_uses_generic_mail_provider_fields(tmp_path, monk
     assert deleted == [55]
     assert cleanup["local_record"] is True
     assert cleanup["cloudmail_deleted"] is True
+
+
+def test_delete_managed_account_targets_only_enabled_remote_syncs(tmp_path, monkeypatch):
+    auth_dir = tmp_path / "auths"
+    auth_dir.mkdir()
+    auth_file = auth_dir / "codex-user@example.com-team.json"
+    auth_file.write_text("{}", encoding="utf-8")
+
+    accounts = [
+        {
+            "email": "user@example.com",
+            "status": "standby",
+            "auth_file": str(auth_file),
+            "mail_provider": "cloudmail",
+            "mail_account_id": None,
+            "cloudmail_account_id": None,
+        }
+    ]
+    remote_calls = []
+
+    def _capture_remote_cleanup(email, *, auth_names=None, include_disabled=False):
+        remote_calls.append(
+            {
+                "email": email,
+                "auth_names": list(auth_names or []),
+                "include_disabled": include_disabled,
+            }
+        )
+        return {}
+
+    monkeypatch.setattr(account_ops, "AUTH_DIR", auth_dir)
+    monkeypatch.setattr(account_ops, "load_accounts", lambda: list(accounts))
+    monkeypatch.setattr(account_ops, "save_accounts", lambda items: accounts.clear() or accounts.extend(items))
+    monkeypatch.setattr(account_ops, "delete_account_from_configured_targets", _capture_remote_cleanup)
+    monkeypatch.setattr(account_ops, "sync_to_cpa", lambda: None)
+
+    account_ops.delete_managed_account(
+        "user@example.com",
+        remove_remote=True,
+        remote_state=([], []),
+        sync_cpa_after=False,
+    )
+
+    assert remote_calls == [
+        {
+            "email": "user@example.com",
+            "auth_names": ["codex-user@example.com-team.json"],
+            "include_disabled": False,
+        }
+    ]
