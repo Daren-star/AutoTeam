@@ -87,6 +87,7 @@ class SetupConfig(BaseModel):
     SYNC_TARGET_CPA: str | bool = ""
     CPA_URL: str = "http://127.0.0.1:8317"
     CPA_KEY: str = ""
+    AUTOTEAM_INSTANCE_ID: str = "default"
     SYNC_TARGET_SUB2API: str | bool = ""
     SUB2API_URL: str = ""
     SUB2API_EMAIL: str = ""
@@ -142,6 +143,7 @@ _ALL_RUNTIME_ENV_KEYS = [
     "SYNC_TARGET_CPA",
     "CPA_URL",
     "CPA_KEY",
+    "AUTOTEAM_INSTANCE_ID",
     "SYNC_TARGET_SUB2API",
     "SUB2API_URL",
     "SUB2API_EMAIL",
@@ -553,6 +555,9 @@ def _validate_runtime_optional_values(values: dict[str, str]):
     _normalize_bool("SUB2API_AUTO_PAUSE_ON_EXPIRED")
     _normalize_bool("SUB2API_OPENAI_PASSTHROUGH")
     _normalize_bool("SUB2API_OVERWRITE_ACCOUNT_SETTINGS")
+
+    instance_id = str(normalized.get("AUTOTEAM_INSTANCE_ID", "") or "").strip()
+    normalized["AUTOTEAM_INSTANCE_ID"] = instance_id or "default"
 
     ws_mode = str(normalized.get("SUB2API_OPENAI_WS_MODE", "") or "").strip().lower()
     if ws_mode:
@@ -1910,8 +1915,8 @@ def post_account_login(params: LoginAccountParams):
             quota_result_resets_at,
             save_auth_file,
         )
-        from autoteam.sync_targets import sync_auth_file_to_configured_targets
         from autoteam.mail_provider import get_mail_client_for_account
+        from autoteam.sync_targets import sync_auth_file_to_configured_targets
 
         mail_client = get_mail_client_for_account(acc)
         mail_client.login()

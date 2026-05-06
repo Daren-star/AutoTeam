@@ -36,6 +36,7 @@ REQUIRED_CONFIGS = [
     ("SYNC_TARGET_CPA", "启用 CPA 同步（true/false）", "", True),
     ("CPA_URL", "CPA (CLIProxyAPI) 地址", "http://127.0.0.1:8317", True),
     ("CPA_KEY", "CPA 管理密钥", "", True),
+    ("AUTOTEAM_INSTANCE_ID", "AutoTeam 实例 ID（多个 AutoTeam 共用同一个 Sub2API 时必须不同）", "default", True),
     ("SYNC_TARGET_SUB2API", "启用 Sub2API 同步（true/false）", "", True),
     ("SUB2API_URL", "Sub2API 地址", "", True),
     ("SUB2API_EMAIL", "Sub2API 管理员邮箱", "", True),

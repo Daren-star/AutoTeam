@@ -162,6 +162,7 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
                 "CLOUDMAIL_DOMAIN=@example.com",
                 "CPA_URL=http://127.0.0.1:8317",
                 "CPA_KEY=key-1",
+                "AUTOTEAM_INSTANCE_ID=team-a",
                 "SUB2API_CONCURRENCY=12",
                 "SUB2API_PROXY=Residential Pool",
                 "SUB2API_OPENAI_WS_MODE=ctx_pool",
@@ -182,6 +183,7 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
         "CLOUDMAIL_DOMAIN",
         "CPA_URL",
         "CPA_KEY",
+        "AUTOTEAM_INSTANCE_ID",
         "SUB2API_CONCURRENCY",
         "SUB2API_PROXY",
         "SUB2API_OPENAI_WS_MODE",
@@ -200,6 +202,8 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
     assert fields["CLOUDMAIL_EMAIL"]["runtime_required"] is True
     assert fields["CPA_KEY"]["value"] == "key-1"
     assert fields["CPA_KEY"]["runtime_required"] is True
+    assert fields["AUTOTEAM_INSTANCE_ID"]["value"] == "team-a"
+    assert fields["AUTOTEAM_INSTANCE_ID"]["runtime_required"] is False
     assert fields["SUB2API_CONCURRENCY"]["value"] == "12"
     assert fields["SUB2API_CONCURRENCY"]["runtime_required"] is False
     assert fields["SUB2API_PROXY"]["value"] == "Residential Pool"
@@ -288,6 +292,7 @@ def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(mo
             CLOUDMAIL_DOMAIN="",
             CPA_URL="",
             CPA_KEY="",
+            AUTOTEAM_INSTANCE_ID="team-a",
             ACCOUNT_REUSE_MODE="one_use",
             PLAYWRIGHT_PROXY_URL="",
             PLAYWRIGHT_PROXY_BYPASS="",
@@ -297,6 +302,7 @@ def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(mo
 
     assert result["message"] == "配置保存成功"
     assert written["API_KEY"] == "old-key"
+    assert written["AUTOTEAM_INSTANCE_ID"] == "team-a"
     assert written["ACCOUNT_REUSE_MODE"] == "one_use"
     assert "CPA_URL" not in written
 

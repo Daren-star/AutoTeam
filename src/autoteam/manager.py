@@ -68,6 +68,8 @@ from autoteam.mail_provider import (
 )
 from autoteam.sync_targets import (
     sync_auth_file_to_configured_targets as sync_auth_file_to_targets,
+)
+from autoteam.sync_targets import (
     sync_main_codex_to_configured_targets as sync_main_codex_to_cpa,
 )
 from autoteam.sync_targets import (

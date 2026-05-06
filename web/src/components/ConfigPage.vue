@@ -498,6 +498,7 @@ const emit = defineEmits(['refresh', 'admin-progress'])
 const runtimeCategoryKeys = {
   cloudmail: ['MAIL_PROVIDER', 'CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN', 'CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN'],
   sync: [
+    'AUTOTEAM_INSTANCE_ID',
     'SYNC_TARGET_CPA',
     'SYNC_TARGET_SUB2API',
     'CPA_URL',
@@ -583,6 +584,7 @@ const sourceMessage = ref('')
 const sourceMessageClass = ref('')
 const runtimeRequiredKeys = new Set(['API_KEY'])
 const sub2apiFieldHints = {
+  AUTOTEAM_INSTANCE_ID: 'ENV: AUTOTEAM_INSTANCE_ID · extra.autoteam_instance_id',
   SUB2API_URL: 'ENV: SUB2API_URL · Sub2API API base URL',
   SUB2API_EMAIL: 'ENV: SUB2API_EMAIL · login.email',
   SUB2API_PASSWORD: 'ENV: SUB2API_PASSWORD · login.password',
@@ -626,7 +628,7 @@ const syncCpaEnabled = computed(() => String(runtimeForm.SYNC_TARGET_CPA || '').
 const syncSub2apiEnabled = computed(() => String(runtimeForm.SYNC_TARGET_SUB2API || '').toLowerCase() === 'true')
 const syncCpaFields = computed(() => syncCpaEnabled.value ? fieldsByKeys(['CPA_URL', 'CPA_KEY']) : [])
 const syncSub2apiConnectionFields = computed(() => syncSub2apiEnabled.value
-  ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'])
+  ? fieldsByKeys(['AUTOTEAM_INSTANCE_ID', 'SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'])
   : [])
 const syncSub2apiDefaultFields = computed(() => syncSub2apiEnabled.value
   ? fieldsByKeys([
