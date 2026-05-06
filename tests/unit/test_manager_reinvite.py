@@ -3,6 +3,111 @@ import types
 from autoteam import accounts, manager
 
 
+class _FakeInput:
+    def __init__(self, name, events, *, visible=True, editable=True):
+        self.name = name
+        self.events = events
+        self.visible = visible
+        self.editable = editable
+
+    def is_visible(self, timeout=None):
+        return self.visible
+
+    def is_editable(self, timeout=None):
+        return self.editable
+
+    def fill(self, value):
+        self.events.append(("fill", self.name, value))
+
+    def click(self, timeout=None, force=False):
+        self.events.append(("click", self.name))
+
+
+class _FakeLocator:
+    def __init__(self, item=None, items=None):
+        self._item = item
+        self._items = list(items or ([] if item is None else [item]))
+        self.first = self._items[0] if self._items else _FakeInput("missing", [], visible=False, editable=False)
+
+    def all(self):
+        return self._items
+
+    def nth(self, index):
+        return self._items[index]
+
+
+class _FakeDirectRegisterPage:
+    def __init__(self, url, fields):
+        self.url = url
+        self.fields = fields
+
+    def locator(self, selector):
+        if 'input[name="name"]' in selector:
+            return _FakeLocator(self.fields.get("name"))
+        if 'input[name="age"]' in selector:
+            return _FakeLocator(self.fields.get("age"))
+        if '[role="spinbutton"]' in selector:
+            return _FakeLocator(items=self.fields.get("spinbuttons", []))
+        if 'button' in selector:
+            return _FakeLocator(self.fields.get("button"))
+        return _FakeLocator()
+
+
+def test_email_verification_register_with_profile_fields_detects_profile(monkeypatch):
+    events = []
+    page = _FakeDirectRegisterPage(
+        "https://auth.openai.com/email-verification/register",
+        {"name": _FakeInput("name", events)},
+    )
+    monkeypatch.setattr(manager, "_is_google_redirect", lambda _page: False)
+
+    assert manager._detect_direct_register_step(page) == "profile"
+
+
+def test_email_verification_register_profile_fills_name_and_age(monkeypatch):
+    events = []
+    page = _FakeDirectRegisterPage(
+        "https://auth.openai.com/email-verification/register",
+        {
+            "name": _FakeInput("name", events),
+            "age": _FakeInput("age", events),
+            "button": _FakeInput("submit", events),
+        },
+    )
+    monkeypatch.setattr(manager, "_wait_for_direct_register_step", lambda *args, **kwargs: "completed")
+    monkeypatch.setattr(manager.time, "sleep", lambda _seconds: None)
+
+    assert manager._complete_direct_about_you(page) is True
+    assert ("fill", "name", "User") in events
+    assert ("fill", "age", "25") in events
+
+
+def test_create_account_direct_waits_30_seconds_before_retry(monkeypatch):
+    sleeps = []
+    attempts = []
+
+    class FakeMailClient:
+        provider_name = "cloudmail"
+
+        def create_temp_email(self):
+            return 42, "new-user@example.com"
+
+        def delete_account(self, _account_id):
+            return None
+
+    def fake_register(*args, **kwargs):
+        attempts.append(True)
+        return False
+
+    monkeypatch.setattr(manager, "_register_direct_once", fake_register)
+    monkeypatch.setattr(manager, "_is_email_in_team", lambda email: False)
+    monkeypatch.setattr(manager.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    assert manager.create_account_direct(FakeMailClient()) is None
+    assert len(attempts) == 3
+    assert sleeps == [30, 30]
+
+
 def test_reinvite_account_uses_unified_oauth_login_and_marks_active(monkeypatch):
     events = []
 

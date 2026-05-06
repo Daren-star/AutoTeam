@@ -1282,6 +1282,15 @@ _DIRECT_EMAIL_SELECTORS = (
 )
 _DIRECT_PASSWORD_SELECTORS = 'input[name="password"], input[type="password"]'
 _DIRECT_CODE_SELECTORS = 'input[name="code"], input[placeholder*="验证码"], input[placeholder*="code" i]'
+_DIRECT_PROFILE_NAME_SELECTORS = (
+    'input[name="name"], input[name="username"], input[name="fullName"], '
+    'input[autocomplete="name"], input[placeholder*="Name" i], input[placeholder*="姓名"], '
+    'input[placeholder*="用户名"]'
+)
+_DIRECT_AGE_SELECTORS = (
+    'input[name="age"], input[aria-label*="Age" i], input[placeholder*="年龄"], input[placeholder*="Age" i]'
+)
+_DIRECT_REGISTER_RETRY_DELAY_SECONDS = 30
 
 
 def _safe_invite_screenshot(page, name):
@@ -1497,14 +1506,31 @@ def _fill_about_you_birthday_by_meta(page):
         return False
 
 
+def _is_direct_profile_page_url(url: str | None) -> bool:
+    value = (url or "").lower()
+    return "about-you" in value or "email-verification/register" in value
+
+
+def _has_direct_profile_fields(page, timeout=300) -> bool:
+    for selector in (_DIRECT_PROFILE_NAME_SELECTORS, _DIRECT_AGE_SELECTORS, '[role="spinbutton"]'):
+        try:
+            if page.locator(selector).first.is_visible(timeout=timeout):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _detect_direct_register_step(page):
     url = (page.url or "").lower()
     if _is_google_redirect(page):
         return "google"
 
+    if _has_direct_profile_fields(page):
+        return "profile"
     if "email-verification" in url:
         return "code"
-    if "about-you" in url:
+    if _is_direct_profile_page_url(url):
         return "profile"
     if "create-account/password" in url or url.endswith("/password"):
         return "password"
@@ -1524,7 +1550,7 @@ def _detect_direct_register_step(page):
         pass
 
     try:
-        if page.locator('input[name="name"], [role="spinbutton"]').first.is_visible(timeout=300):
+        if _has_direct_profile_fields(page):
             return "profile"
     except Exception:
         pass
@@ -1564,7 +1590,7 @@ def _wait_for_direct_step_change(page, current_step, timeout=15):
 
 def _complete_direct_about_you(page):
     """尽量完成 about-you 页面，兼容不同生日字段顺序。"""
-    if "about-you" not in (page.url or "").lower():
+    if not _is_direct_profile_page_url(page.url):
         return True
 
     birthday_orders = [
@@ -1574,11 +1600,11 @@ def _complete_direct_about_you(page):
     ]
 
     for attempt, values in enumerate(birthday_orders, 1):
-        if "about-you" not in (page.url or "").lower():
+        if not _is_direct_profile_page_url(page.url):
             return True
 
         try:
-            name_input = page.locator('input[name="name"]').first
+            name_input = page.locator(_DIRECT_PROFILE_NAME_SELECTORS).first
             if name_input.is_visible(timeout=2000):
                 try:
                     if name_input.is_editable(timeout=500):
@@ -1622,9 +1648,7 @@ def _complete_direct_about_you(page):
                     logger.warning("[直接注册] 生日字段填写失败（第 %d 次）: %s", attempt, exc)
         else:
             try:
-                age_input = page.locator(
-                    'input[name="age"], input[placeholder*="年龄"], input[placeholder*="Age"]'
-                ).first
+                age_input = page.locator(_DIRECT_AGE_SELECTORS).first
                 if age_input.is_visible(timeout=2000) and age_input.is_editable(timeout=500):
                     age_input.fill("25")
                     logger.info("[直接注册] 填入年龄: 25")
@@ -1965,8 +1989,12 @@ def create_account_direct(mail_client):
             break
 
         if attempt < 2:
-            logger.warning("[直接注册] 注册失败且账号不在 Team 中，60 秒后重试: %s", email)
-            time.sleep(60)
+            logger.warning(
+                "[直接注册] 注册失败且账号不在 Team 中，%d 秒后重试: %s",
+                _DIRECT_REGISTER_RETRY_DELAY_SECONDS,
+                email,
+            )
+            time.sleep(_DIRECT_REGISTER_RETRY_DELAY_SECONDS)
 
     if not success:
         logger.error("[直接注册] 连续 3 次注册失败，删除临时账号: %s", email)
