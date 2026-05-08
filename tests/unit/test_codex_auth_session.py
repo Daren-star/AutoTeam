@@ -84,13 +84,14 @@ def test_refresh_main_auth_file_saves_bundle_from_session_login(monkeypatch):
 
 
 class _FakeElement:
-    def __init__(self, text):
+    def __init__(self, text, *, visible=True):
         self._text = text
+        self._visible = visible
         self.clicked = False
         self.click_calls = []
 
     def is_visible(self, timeout=0):
-        return True
+        return self._visible
 
     def inner_text(self, timeout=0):
         return self._text
@@ -111,6 +112,12 @@ class _FakeCollection:
         self._items = items or []
         self._text = text
 
+    @property
+    def first(self):
+        if self._items:
+            return self._items[0]
+        return _FakeElement("", visible=False)
+
     def all(self):
         return list(self._items)
 
@@ -129,7 +136,54 @@ class _FakePage:
     def locator(self, selector):
         if selector == "body":
             return _FakeCollection(text=self._body)
+        if isinstance(self._elements, dict):
+            return _FakeCollection(items=self._elements.get(selector, []))
+        if str(selector).startswith("text="):
+            return _FakeCollection(items=[])
         return _FakeCollection(items=self._elements)
+
+
+def test_existing_session_account_selection_clicks_matching_session_button():
+    target = _FakeElement("User tmp-69a5d0b0@gpttome.indevs.in")
+    remove = _FakeElement("")
+    page = _FakePage(
+        url="https://auth.openai.com/choose-an-account",
+        body="选择帐户 User tmp-69a5d0b0@gpttome.indevs.in 登录至另一个帐户 创建帐户",
+        elements={
+            'button[name="session_id"]': [target],
+            'button[data-dd-action-name="Select existing session"]': [],
+            "button": [remove],
+        },
+    )
+
+    assert codex_auth._is_existing_session_selection_page(page) is True
+    assert codex_auth._select_existing_account_session(page, "tmp-69a5d0b0@gpttome.indevs.in") is True
+    assert target.click_calls == [{"timeout": 3000, "force": False}]
+    assert remove.clicked is False
+
+
+def test_session_flow_clicks_existing_session_selection_page(monkeypatch):
+    monkeypatch.setattr(codex_auth.time, "sleep", lambda _seconds: None)
+
+    target = _FakeElement("User owner@example.com")
+    page = _FakePage(
+        url="https://auth.openai.com/choose-an-account",
+        body="Choose account User owner@example.com Log in with another account",
+        elements={
+            'button[name="session_id"]': [target],
+            'button[data-dd-action-name="Select existing session"]': [],
+        },
+    )
+    flow = codex_auth.SessionCodexAuthFlow(
+        email="owner@example.com",
+        session_token="session-token",
+        account_id="acc-1",
+        workspace_name="Idapro",
+    )
+    flow.page = page
+
+    assert flow._click_workspace_or_consent() is True
+    assert target.clicked is True
 
 
 def test_workspace_selection_detection_ignores_otp_pages():

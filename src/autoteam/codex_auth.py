@@ -378,6 +378,22 @@ _WORKSPACE_IGNORE_SUBSTRINGS = (
     "continue with password",
     "use password",
 )
+_EXISTING_SESSION_PAGE_HINTS = (
+    "choose account",
+    "choose an account",
+    "select account",
+    "select an account",
+    "选择帐户",
+    "选择账户",
+    "选择账号",
+    "登录至另一个帐户",
+    "登录至另一个账户",
+    "登录至另一个账号",
+)
+_EXISTING_SESSION_BUTTON_SELECTORS = (
+    'button[name="session_id"]',
+    'button[data-dd-action-name="Select existing session"]',
+)
 
 
 def _is_otp_input_visible(page, timeout=500):
@@ -434,6 +450,79 @@ def _wait_for_otp_submit_result(page, timeout=12):
             return err, err
         return "invalid", err
     return "pending", None
+
+
+def _is_existing_session_selection_page(page) -> bool:
+    url = (page.url or "").lower()
+    if "choose-an-account" in url:
+        return True
+
+    try:
+        body = page.locator("body").inner_text(timeout=1200).lower()
+    except Exception:
+        body = ""
+
+    return any(hint.lower() in body for hint in _EXISTING_SESSION_PAGE_HINTS)
+
+
+def _existing_session_button_candidates(page):
+    if not _is_existing_session_selection_page(page):
+        return []
+
+    seen = set()
+    candidates = []
+    for selector in _EXISTING_SESSION_BUTTON_SELECTORS:
+        try:
+            for loc in page.locator(selector).all():
+                key = id(loc)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    if not loc.is_visible(timeout=200):
+                        continue
+                    text = re.sub(r"\s+", " ", loc.inner_text(timeout=300)).strip()
+                except Exception:
+                    text = ""
+                candidates.append((text, loc))
+        except Exception:
+            continue
+    return candidates
+
+
+def _click_existing_session_locator(loc) -> bool:
+    try:
+        loc.click(timeout=3000)
+        return True
+    except Exception:
+        try:
+            loc.click(force=True, timeout=1000)
+            return True
+        except Exception:
+            return False
+
+
+def _select_existing_account_session(page, email: str = "") -> bool:
+    candidates = _existing_session_button_candidates(page)
+    if not candidates:
+        return False
+
+    preferred_email = str(email or "").strip().lower()
+    if preferred_email:
+        for text, loc in candidates:
+            if preferred_email not in text.lower():
+                continue
+            if _click_existing_session_locator(loc):
+                logger.info("[Codex] 选择已有登录会话: %s", preferred_email)
+                time.sleep(3)
+                return True
+
+    if len(candidates) == 1 and _click_existing_session_locator(candidates[0][1]):
+        logger.info("[Codex] 选择唯一已有登录会话")
+        time.sleep(3)
+        return True
+
+    return False
 
 
 def _is_workspace_ignored_label(text: str) -> bool:
@@ -626,6 +715,7 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
         try:
             _page.locator('button:has-text("登录"), button:has-text("Log in")').first.click()
             time.sleep(3)
+            _select_existing_account_session(_page, email)
         except Exception:
             pass
 
@@ -910,6 +1000,9 @@ def login_codex_via_browser(email, password, mail_client=None, *, return_result=
                 if failure_result:
                     _log_terminal_oauth_failure(email, failure_result)
                     break
+
+                if _select_existing_account_session(page, email):
+                    continue
 
                 workspace_name = get_chatgpt_workspace_name()
                 # 检测"选择一个工作空间"页面，点击 Team workspace
@@ -1409,6 +1502,12 @@ class SessionCodexAuthFlow:
 
     def _click_workspace_or_consent(self):
         acted = False
+
+        try:
+            if _select_existing_account_session(self.page, self.email):
+                return True
+        except Exception:
+            pass
 
         try:
             if self.workspace_name and _is_workspace_selection_page(self.page):
